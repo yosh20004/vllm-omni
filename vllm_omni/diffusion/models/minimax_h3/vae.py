@@ -1181,3 +1181,10 @@ class MiniMaxH3AudioVAE(nn.Module):
 
 
 __all__ = ["MiniMaxH3AudioVAE", "MiniMaxH3VideoVAE"]
+
+
+# Personal-fork learning experiment; worker imports see the same opt-in environment.
+if os.environ.get("MINIMAX_H3_EXPERIMENTAL_FUSED_VAE_GRAPH", "0") == "1":
+    from .experimental.fused_vae_graph import install as _install_fused_vae_graph
+
+    _install_fused_vae_graph(MiniMaxH3VideoVAE)
