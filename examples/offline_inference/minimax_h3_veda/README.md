@@ -107,3 +107,71 @@ they cover routing semantics, masks, partial tiles, head chunking, padding,
 backend selection and invalid layouts. They do not validate GPU code generation.
 The prefix split has prior B300 synthetic validation, but the newly exposed
 bridge option has not been measured in a full-model generation.
+
+## Reproduce the prefix benchmark
+
+On a B300 with the pinned runtime, run:
+
+```bash
+python examples/offline_inference/minimax_h3_veda/h3_prefix_bench.py \
+  --predictor assets/predictor.safetensors --output outputs/prefix-run
+python examples/offline_inference/minimax_h3_veda/h3_prefix_analyze.py \
+  outputs/prefix-run
+```
+
+The output directory must not exist. The runner loads only the predictor,
+uses synthetic BF16 Q/K/V of shape `[44096, 56, 128]`, and checks small
+partial-tile cases before warming all 50 actual layer plans. It compares the
+original sparse path, dense-FA4 prefix, and dense-TRTLLM prefix. Each path
+runs three rotating-order bare measurements, followed by a diagnostic trace
+of layers 0, 1 and 17. It does not load the H3 model or save Q/K/V.
+The original path explicitly disables prefix routing, even if the enabling
+environment variable is set. The benchmark requires both dense backends.
+
+Outputs include `preflight.json`, `benchmark.json`, `trace.json.gz` and,
+after analysis, `trace_analysis.json`. The analysis uses CPU-launch
+correlation and layer annotations: FA4 dense and sparse kernels share names,
+so names alone cannot distinguish them. GPU busy time is interval coverage,
+not hardware utilization.
+
+### Existing B300 measurements (2026-10-08)
+
+These measurements predate code extraction into this branch. Each method
+includes selector, gather, block-list preparation, attention, scatter and
+prefix copy. Median wall time for 50 layers, three measurements:
+
+| Method | Time | Speedup |
+| --- | ---: | ---: |
+| Original Miowtion | 994.015 ms | 1.000× |
+| Dense FA4 prefix + sparse video | 799.769 ms | 1.243× |
+| Dense TRTLLM prefix + sparse video | 817.504 ms | 1.216× |
+
+All 50 layers retained bitwise-equal video-query outputs. Prefix maximum
+absolute error was 0.00024414, relative MSE approximately 9.94e-6; full-output
+relative MSE was below 9.2e-8. Dense prefix reduction order differs from
+tile-ordered sparse attention. Small cases also passed against an FP32
+reference at Q/K scales 1 and 2. These results use synthetic activations
+reused across layers, not the actual denoising trajectory. The speedups
+are attention microbenchmark results, not end-to-end video speedups.
+
+### Sparse kernel configuration findings
+
+Separate synthetic kernel trials after removing prefix queries did not
+improve on the original M=128, N=128, Q-stage=1, 1CTA configuration:
+
+| Candidate | Outcome versus baseline |
+| --- | --- |
+| N=64 | 1.13–1.16× slower |
+| Q-stage=2, union two query masks | 5.38–5.61× slower |
+| 2CTA, M=128, union two query masks | 5.82–6.07× slower |
+| 2CTA and Q-stage=2, union four masks | 9.16–9.56× slower |
+| M=64, Q-stage=2 or 2CTA | TMEM layout/alignment compilation failures |
+
+The union candidates preserved each original 128-row mask with a fine mask,
+but increased work. These are negative results for that adaptation, not a
+general limit on sparse 2CTA. Two CTAs with 64 rows each could share one
+128-row selection; the tested upstream TMEM path did not compile for it.
+No experimental FA4 patches or configuration changes are enabled here.
+
+This branch also retains the earlier
+[fused VAE tile CUDA Graph experiment](../minimax_h3_fused_vae_graph/README.md).
