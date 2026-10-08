@@ -73,3 +73,37 @@ This run also enabled regional compilation and the fused VAE tile graph
 experiment. It captured only a Veda trace, not a matching Turbo8 dense trace.
 These results do not establish video quality parity or statistical variance.
 Weights, videos and raw traces are deliberately excluded from Git.
+
+## Dense-prefix routing
+
+Set `H3_VEDA_PREFIX_BACKEND=fa4` to enable `SplitStudent` when the bridge is
+in `veda` mode. `trtllm` is an alternative requiring FlashInfer's
+`trtllm_ragged_attention_deepseek`; `none` (default) preserves the original
+Miowtion path. The student cache distinguishes backend and device.
+
+The supported layout has exactly one final target video span and a nonempty
+global prefix. Other layouts raise an error. Routing splits **query rows**:
+
+- Prefix queries use dense attention over every valid key, once across all heads.
+- Video queries use the original selector and sparse attention, retaining all
+  global keys in the same softmax as the selected video keys.
+- Only video results are scattered; the dense prefix is copied into its
+  original positions. Tail padding remains zero. No LSE merge is needed.
+
+The scatter-only layout view sets `n_global_tiles=0`. It must never be passed
+to the selector or attention: doing so would remove required global keys.
+Layers explicitly configured as dense retain their full dense path.
+The adapter is inference-only; it does not build a predictor autograd graph.
+
+Run CPU routing tests with the pinned Miowtion package installed:
+
+```bash
+python -m pytest -o addopts='' -q \
+  examples/offline_inference/minimax_h3_veda/test_prefix_split.py
+```
+
+These tests replace GPU kernel boundaries with mathematical CPU references;
+they cover routing semantics, masks, partial tiles, head chunking, padding,
+backend selection and invalid layouts. They do not validate GPU code generation.
+The prefix split has prior B300 synthetic validation, but the newly exposed
+bridge option has not been measured in a full-model generation.

@@ -153,12 +153,16 @@ def prepare_bundle():
         print("Loaded Ref2VA Veda selector: 50 layers, 56 heads, 32/32 tiles", flush=True)
 
 
-def student_for(video_layout, seq_len, used, device):
+def student_for(video_layout, seq_len, used, device, *, prefix_backend=None):
     from miowtion.h3.geometry import Geometry
     from miowtion.veda.attention import ClipTiling, SparseStudent, VedaConfig
 
     view = adapt_layout(video_layout, seq_len, used)
-    key = (seq_len, used, tuple((s.start, s.grid, s.role) for s in view.spans))
+    if prefix_backend is None:
+        prefix_backend = os.environ.get("H3_VEDA_PREFIX_BACKEND", "none")
+    if prefix_backend not in ("none", "fa4", "trtllm"):
+        raise ValueError("H3_VEDA_PREFIX_BACKEND must be none, fa4 or trtllm")
+    key = (seq_len, used, tuple((s.start, s.grid, s.role) for s in view.spans), str(device), prefix_backend)
     if key not in STUDENTS:
         prepare_bundle()
         t, h, w = view.target.grid
@@ -179,7 +183,12 @@ def student_for(video_layout, seq_len, used, device):
         for layer in range(50):
             for group in plan.head_groups(layer, device):
                 clip.get(group.shape)
-        STUDENTS[key] = SparseStudent(clip, plan, BUNDLE.predictor)
+        student = SparseStudent(clip, plan, BUNDLE.predictor)
+        if prefix_backend != "none":
+            from h3_prefix_split import SplitStudent
+
+            student = SplitStudent(student, prefix_backend)
+        STUDENTS[key] = student
         evidence = {
             "seq_len": seq_len,
             "used": used,
@@ -189,6 +198,7 @@ def student_for(video_layout, seq_len, used, device):
             "actual_grid": view.target.grid,
             "collect_bytes": config.collect_bytes,
             "tile_shapes": [str(s) for s in plan.shapes],
+            "prefix_backend": prefix_backend,
         }
         EVIDENCE["layouts"].append(evidence)
         print("Veda layout:", json.dumps(evidence), flush=True)
